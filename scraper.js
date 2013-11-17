@@ -11,13 +11,21 @@
 var scraper = function (queue, api, page, i){
 
       console.log = require('./console').log;
-      var EXTRACT_URL_REG = /\b((?:https?:\/\/|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}\/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'".,<>?«»“”‘’]))/gi;
+      var EXTRACT_URL_REG = /\b((?:https?:\/\/|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}\/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s!()\[\]{};:.,<>?«»]))/gi;
       var PORT            = 3000;
        
       var request         = require('request');
       request.defaults({'proxy':'http://cache.cites-u.univ-nantes.fr:3128'});
+      
+      var mysql      = require('mysql');
+      var connection = mysql.createConnection({
+        host     : 'localhost',
+        user     : 'webspider',
+        password : '123',
+        database : 'webspider'
+      });
 
-       
+      connection.connect();
       // You should (okay: could) use your OWN implementation here!
       var EventEmitter    = require('events').EventEmitter;
 
@@ -63,15 +71,24 @@ var scraper = function (queue, api, page, i){
            *  -> was compression active ? (Content-Encoding: gzip ?)
            *  -> the Content-Type
            */
-           
           if(error){
             em.emit('page:error', page_url, error);
             return;
           }
-       
-          em.emit('page', page_url, html_str, http_client_response._readableState.defaultEncoding,
-            http_client_response.headers.server, http_client_response.headers['content-type'],
-            http_client_response.headers['content-length']);
+       	  var page = {
+       	  	url : page_url,
+       	  	encoding : http_client_response._readableState.defaultEncoding,
+            server : http_client_response.headers.server,
+            content_type : http_client_response.headers['content-type'],
+            content_length : http_client_response.headers['content-length']
+       	  }
+          connection.query("UPDATE urls SET Encoding = '" + page.encoding + "'," +
+            "Server = '" + page.server + "'," +
+            "Content_type = '" + page.content_type + "'," +
+            "Content_length = '" + page.content_length + "'" +
+            "WHERE url = '" + page.url + "';"
+          );
+          em.emit('page', page, html_str);
         });
       }
        
@@ -81,7 +98,7 @@ var scraper = function (queue, api, page, i){
        *
        * `extract_links` should emit an `link(` event each
        */
-      function extract_links(page_url, html_str, i){
+      function extract_links(page, html_str, i){
         // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/match
         // "match" can return "null" instead of an array of url
         // So here I do "(match() || []) in order to always work on an array (and yes, that's another pattern).
@@ -91,28 +108,28 @@ var scraper = function (queue, api, page, i){
           // - check if we already crawled this url
           // - ...
             if(queue.indexOf(url) == -1)
-             em.emit('url', page_url, html_str, url);
+             em.emit('url', page, html_str, url);
         });
         em.emit('exit');
       }
        
-      function handle_new_url(from_page_url, from_page_str, url){
+      function handle_new_url(from_page, from_page_str, url){
         // Add the url to the queue
+        console.log("Error-->(\'"+ url+ '\');');
         queue.push(url);
+        connection.query('INSERT INTO urls (Url, From_page) VALUES (\'' + url + '\',\''+ from_page.url+'\');',
+          function (err, rows, fields) {
+            if (err) {
+                console.log("Error MySQL: " + err.message);
+                throw err;
+            }
+       });
        
-        // ... and may be do other things like saving it to a database
-        // in order to then provide a Web UI to request the data (or monitoring the scraper maybe ?)
-        // You'll want to use `express` to do so
+        
       }
 
-      function logHeader(page_url, html_str, defaultEncoding, server, content_type, content_length){
-            console.log("Encoding: " + defaultEncoding);
-            console.log("Server: " + server);
-            console.log("Content Type: " + content_type);
-            console.log("Content length: " + content_length);
-      }
       
-      em.on('page', logHeader);
+      
       
       em.on('page:scraping', function(page_url){
         console.log('Loading... ', page_url);
@@ -144,8 +161,10 @@ var scraper = function (queue, api, page, i){
       em.on('exit', function(){
           if(i<queue.length)
             scraper(queue, api, queue[i], ++i);
-          else
+          else{
             console.log("Le scraper n'a plus pages.")
+            connection.end();
+          }
       });
 
       // #debug Start the crawler with a link
